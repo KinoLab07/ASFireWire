@@ -9,6 +9,7 @@
 #include "Isoch/Profiles/FocusriteSaffireProfile.hpp"
 #include "Isoch/Profiles/GenericDiceProfile.hpp"
 #include "Isoch/Profiles/MidasVeniceProfile.hpp"
+#include "Isoch/Profiles/AvidMboxProProfile.hpp"
 #include "Isoch/Profiles/PreSonusStudioLiveProfile.hpp"
 #include "Isoch/Profiles/WeissIntProfile.hpp"
 
@@ -19,6 +20,7 @@ Profiles::GenericDiceProfile gGenericProfile{};
 Profiles::FocusriteSaffireProfile gFocusriteProfile{};
 Profiles::FocusriteSaffirePro40Profile gFocusritePro40Profile{};
 Profiles::MidasVeniceProfile gMidasVeniceProfile{};
+Profiles::AvidMboxProProfile gAvidMboxProProfile{};
 Profiles::PreSonusStudioLiveProfile gPreSonusStudioLiveProfile{};
 Profiles::AlesisMultiMixProfile gAlesisMultiMixProfile{};
 Profiles::WeissIntProfile gWeissIntProfile{};
@@ -28,6 +30,7 @@ DiceProfileRegistry::DiceProfileRegistry() noexcept {
     (void)RegisterProfile(&gFocusritePro40Profile);
     (void)RegisterProfile(&gFocusriteProfile);
     (void)RegisterProfile(&gMidasVeniceProfile);
+    (void)RegisterProfile(&gAvidMboxProProfile);
     (void)RegisterProfile(&gPreSonusStudioLiveProfile);
     (void)RegisterProfile(&gAlesisMultiMixProfile);
     (void)RegisterProfile(&gWeissIntProfile);

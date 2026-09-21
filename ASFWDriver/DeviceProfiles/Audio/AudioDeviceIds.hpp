@@ -60,6 +60,13 @@ inline constexpr uint32_t kAlesisMultiMixModelId = 0x000000;
 inline constexpr uint32_t kMidasVendorId       = 0x10c73f;
 inline constexpr uint32_t kMidasVeniceModelId  = 0x000001;
 
+// ---- Avid / Digidesign (DICE / TCAT family) ----
+// Mbox Pro (3rd gen, 2011). Config ROM read from hardware 2026-09-16:
+// ieee1394:ven0000A07Emo00000004sp0000A07Ever00000001 - the unit directory carries
+// specifier_id == the vendor OUI and version 0x000001, the canonical DICE signature.
+inline constexpr uint32_t kAvidVendorId        = 0x00a07e;
+inline constexpr uint32_t kMboxProModelId      = 0x000004;
+
 // ---- PreSonus (DICE / TCAT family) ----
 // The OUI is shared with PreSonus BeBoB-era devices (FireBox/FP10/Inspire) and the
 // DICE FireStudio (model 0x000008); only exact vendor+model pairs may match.
@@ -99,6 +106,8 @@ inline constexpr const char* kAlesisVendorName        = "Alesis";
 inline constexpr const char* kAlesisMultiMixModelName = "MultiMix FireWire";
 inline constexpr const char* kMidasVendorName         = "Midas";
 inline constexpr const char* kMidasVeniceModelName    = "Venice F32";
+inline constexpr const char* kAvidVendorName          = "Avid";
+inline constexpr const char* kMboxProModelName        = "Mbox Pro";
 inline constexpr const char* kPreSonusVendorName      = "PreSonus";
 inline constexpr const char* kStudioLive1602ModelName = "StudioLive 16.0.2";
 inline constexpr const char* kStudioLive1642ModelName = "StudioLive 16.4.2";

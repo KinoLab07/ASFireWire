@@ -5,7 +5,9 @@
 
 #include "DICETcatProtocol.hpp"
 
+#include "../../../../Common/TimingUtils.hpp"
 #include "../../../../Logging/Logging.hpp"
+#include "../Core/DICENotificationMailbox.hpp"
 
 #include <memory>
 #include <utility>
@@ -13,6 +15,10 @@
 namespace ASFW::Audio::DICE::TCAT {
 
 namespace {
+
+// Avid Mbox Pro UILEDState, inside the TCAT application (vendor) section.
+// Extracted from Avid's LaunchdDaemon: DiceUtils::FeatureQuadlet<Murphy::UILEDState>.
+constexpr uint32_t kMboxProUILedStateOffset = 0x14;
 
 [[nodiscard]] bool HasUsableRuntimeCaps(const AudioStreamRuntimeCaps& caps) noexcept {
     // CoreAudio visibility is not a wire-topology signal. A Weiss INT202, for
@@ -100,12 +106,19 @@ IOReturn DICETcatProtocol::Initialize() {
         duplexCtrl_->SetTeardownCancelToken(teardownCancel_);
     }
 
+    if (runtimePolicy_.routerCycleNotifyMask != 0 && runtimePolicy_.routerProgramCount >= 2) {
+        NotificationMailbox::SetObserver(this, &DICETcatProtocol::NotificationThunk);
+        ASFW_LOG(DICE, "DICETcatProtocol: front-panel cycles %u output modes (mask=0x%08x)",
+                 runtimePolicy_.routerProgramCount, runtimePolicy_.routerCycleNotifyMask);
+    }
+
     initialized_ = true;
     ASFW_LOG(DICE, "DICETcatProtocol::Initialize defers generic discovery until runtime");
     return kIOReturnSuccess;
 }
 
 IOReturn DICETcatProtocol::Shutdown() {
+    NotificationMailbox::ClearObserver(this);
     if (duplexCtrl_) {
         if (duplexCtrl_->IsPrepared() || duplexCtrl_->IsRunning()) {
             const IOReturn stopStatus = duplexCtrl_->StopDuplex();
@@ -166,6 +179,726 @@ void DICETcatProtocol::SetTeardownCancelToken(const std::atomic<bool>* cancel) n
     }
 }
 
+void DICETcatProtocol::WriteRouterProgram(const uint16_t* entries,
+                                         uint32_t count,
+                                         VoidCallback callback) {
+    diceReader_.ReadExtensionSections(
+        [this, entries, count, callback = std::move(callback)](IOReturn status,
+                                                               ExtensionSections ext) mutable {
+            if (status != kIOReturnSuccess) {
+                ASFW_LOG(DICE, "WriteRouterProgram: extension sections unreadable (0x%08x)", status);
+                callback(status);
+                return;
+            }
+
+            const uint32_t routerBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.router);
+            const uint32_t commandBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.command);
+            if (routerBase == kDICEExtensionOffset || commandBase == kDICEExtensionOffset) {
+                ASFW_LOG(DICE, "WriteRouterProgram: device exposes no TCAT router/command section");
+                callback(kIOReturnUnsupported);
+                return;
+            }
+
+            // Wire image: quadlet 0 is the entry count, then one quadlet per entry.
+            const size_t bytes = (static_cast<size_t>(count) + 1U) * 4U;
+            auto buffer = std::make_shared<std::vector<uint8_t>>(bytes, 0U);
+            FW::WriteBE32(buffer->data(), count);
+            for (uint32_t i = 0; i < count; ++i) {
+                FW::WriteBE32(buffer->data() + (i + 1U) * 4U, entries[i]);
+            }
+
+            (void)io_.WriteBlock(
+                MakeDICEAddress(routerBase),
+                std::span<const uint8_t>(buffer->data(), buffer->size()),
+                [this, commandBase, count, buffer, callback = std::move(callback)](
+                    Async::AsyncStatus writeStatus) mutable {
+                    const IOReturn st = Protocols::Ports::MapAsyncStatusToIOReturn(writeStatus);
+                    if (st != kIOReturnSuccess) {
+                        ASFW_LOG(DICE, "WriteRouterProgram: router write failed (0x%08x)", st);
+                        callback(st);
+                        return;
+                    }
+
+                    // Commit for every rate mode, as the vendor driver does. A
+                    // low-mode-only commit is accepted but does not take effect.
+                    const uint32_t opcode = ExtensionCommandOpcode::kExecute |
+                                            ExtensionCommandOpcode::kRateLow |
+                                            ExtensionCommandOpcode::kRateMiddle |
+                                            ExtensionCommandOpcode::kRateHigh |
+                                            ExtensionCommandOpcode::kLoadRouter;
+                    (void)io_.WriteQuadBE(
+                        MakeDICEAddress(commandBase + ExtensionCommandOffset::kOpcode),
+                        opcode,
+                        [count, opcode, callback = std::move(callback)](
+                            Async::AsyncStatus cmdStatus) mutable {
+                            const IOReturn cst = Protocols::Ports::MapAsyncStatusToIOReturn(cmdStatus);
+                            if (cst == kIOReturnSuccess) {
+                                ASFW_LOG(DICE,
+                                         "WriteRouterProgram: programmed %u router entries (opcode=0x%08x)",
+                                         count, opcode);
+                            } else {
+                                ASFW_LOG(DICE, "WriteRouterProgram: commit failed (0x%08x)", cst);
+                            }
+                            callback(cst);
+                        });
+                });
+        });
+}
+
+void DICETcatProtocol::ReadRouterEntryCount(CountCallback callback) {
+    ExtensionSections ext{};
+    if (CachedExtensions(ext)) {
+        ReadRouterEntryCountAt(ext, std::move(callback));
+        return;
+    }
+    diceReader_.ReadExtensionSections(
+        [this, callback = std::move(callback)](IOReturn status, ExtensionSections fresh) mutable {
+            if (status != kIOReturnSuccess) {
+                callback(status, 0U);
+                return;
+            }
+            CacheExtensions(fresh);
+            ReadRouterEntryCountAt(fresh, std::move(callback));
+        });
+}
+
+void DICETcatProtocol::ReadRouterEntryCountAt(const ExtensionSections& ext,
+                                              CountCallback callback) {
+    const uint32_t routerBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.router);
+    if (routerBase == kDICEExtensionOffset) {
+        callback(kIOReturnUnsupported, 0U);
+        return;
+    }
+    (void)io_.ReadQuadBE(MakeDICEAddress(routerBase),
+                         [callback = std::move(callback)](Async::AsyncStatus st,
+                                                          uint32_t value) mutable {
+                             const IOReturn r = Protocols::Ports::MapAsyncStatusToIOReturn(st);
+                             callback(r, r == kIOReturnSuccess ? value : 0U);
+                         });
+}
+
+void DICETcatProtocol::ApplyStartupRouter(VoidCallback callback) {
+    // Devices whose outputs ship routed to MUTED need a router program before
+    // anything reaches their analog stage. The TCAT router is not flash-backed,
+    // so the program is only ever as durable as the device's power.
+    //
+    // This used to latch on the first success and never look again, and that
+    // was wrong: a burst of bus resets around bring-up can leave the device
+    // holding nothing while every write still reported success, and the latch
+    // then guaranteed that nobody would ever put the program back. The device
+    // stayed silent until someone reprogrammed it by hand. So rather than
+    // trusting the latch, read back the entry count the device is really
+    // holding and reprogram whenever it does not match.
+
+    const uint16_t* entries = runtimePolicy_.startupRouterEntries;
+    uint32_t count = runtimePolicy_.startupRouterEntryCount;
+    uint8_t ledSelect = 0;
+    if (runtimePolicy_.routerPrograms != nullptr && runtimePolicy_.routerProgramCount > 0) {
+        const auto& program = runtimePolicy_.routerPrograms[0];
+        entries = program.entries;
+        count = program.entryCount;
+        ledSelect = program.ledSelect;
+    }
+    if (entries == nullptr || count == 0) {
+        callback(kIOReturnSuccess);
+        return;
+    }
+
+    ReadRouterEntryCount([this, entries, count, ledSelect, callback = std::move(callback)](
+                             IOReturn status, uint32_t live) mutable {
+        if (startupRouterApplied_ && status == kIOReturnSuccess && live == count) {
+            callback(kIOReturnSuccess);
+            return;
+        }
+        if (startupRouterApplied_) {
+            ASFW_LOG(DICE, "Startup router lost: device holds %u of %u entries; reprogramming",
+                     live, count);
+            startupRouterApplied_ = false;
+        }
+        ProgramStartupRouter(entries, count, ledSelect, 0U, std::move(callback));
+    });
+}
+
+void DICETcatProtocol::ProgramStartupRouter(const uint16_t* entries, uint32_t count,
+                                            uint8_t ledSelect, uint32_t attempt,
+                                            VoidCallback callback) {
+    WriteRouterProgram(
+        entries, count,
+        [this, entries, count, ledSelect, attempt, callback = std::move(callback)](
+            IOReturn status) mutable {
+            if (status != kIOReturnSuccess) {
+                if (attempt == 0U) {
+                    ASFW_LOG(DICE, "Startup router write failed (0x%08x); retrying once", status);
+                    ProgramStartupRouter(entries, count, ledSelect, attempt + 1U,
+                                         std::move(callback));
+                    return;
+                }
+                callback(status);
+                return;
+            }
+
+            // A commit that reports success is not proof the table is there, so
+            // confirm before latching. This is the check that turns a lost
+            // program into one retry instead of a silent device.
+            ReadRouterEntryCount([this, entries, count, ledSelect, attempt,
+                                  callback = std::move(callback)](IOReturn readStatus,
+                                                                  uint32_t live) mutable {
+                if (attempt == 0U && readStatus == kIOReturnSuccess && live != count) {
+                    ASFW_LOG(DICE, "Startup router did not stick (%u of %u); retrying once",
+                             live, count);
+                    ProgramStartupRouter(entries, count, ledSelect, attempt + 1U,
+                                         std::move(callback));
+                    return;
+                }
+                startupRouterApplied_ = true;
+                activeRouterProgram_.store(0, std::memory_order_release);
+                WriteFrontPanelLed(ledSelect);
+                if (runtimePolicy_.outputTrimCount > 0) {
+                    ReadOutputTrims();
+                }
+                WriteStartupMixerCoefficients();
+                if (runtimePolicy_.mixerInputs > 0) {
+                    (void)RefreshMixer();
+                }
+                callback(kIOReturnSuccess);
+            });
+        });
+}
+
+// --- Output modes (selectable router programs) -------------------------------
+//
+// The Mbox Pro keeps one serial port bank clocked at a time, so its line
+// outputs and its headphones need separate router programs. Avid's driver
+// solves it the same way: the front-panel button rewrites the router table and
+// repaints the LED, and sends nothing else to the hardware.
+
+const char* DICETcatProtocol::RouterProgramName(uint32_t index) const noexcept {
+    if (runtimePolicy_.routerPrograms == nullptr ||
+        index >= runtimePolicy_.routerProgramCount) {
+        return "";
+    }
+    return runtimePolicy_.routerPrograms[index].name;
+}
+
+void DICETcatProtocol::SelectRouterProgram(uint32_t index, VoidCallback callback) {
+    if (runtimePolicy_.routerPrograms == nullptr ||
+        index >= runtimePolicy_.routerProgramCount) {
+        callback(kIOReturnBadArgument);
+        return;
+    }
+    if (!initialized_) {
+        callback(kIOReturnNotReady);
+        return;
+    }
+
+    const auto& program = runtimePolicy_.routerPrograms[index];
+    if (program.entries == nullptr || program.entryCount == 0) {
+        callback(kIOReturnBadArgument);
+        return;
+    }
+
+    ASFW_LOG(DICE, "Output mode: selecting '%{public}s' (program %u)", program.name, index);
+
+    const uint8_t ledSelect = program.ledSelect;
+    WriteRouterProgram(program.entries, program.entryCount,
+                       [this, index, ledSelect, callback = std::move(callback)](
+                           IOReturn status) mutable {
+                           if (status != kIOReturnSuccess) {
+                               ASFW_LOG(DICE, "Output mode: router program failed (0x%08x)", status);
+                               callback(status);
+                               return;
+                           }
+                           activeRouterProgram_.store(index, std::memory_order_release);
+                           WriteFrontPanelLed(ledSelect);
+                           callback(status);
+                       });
+}
+
+IOReturn DICETcatProtocol::SelectOutputMode(uint32_t index) {
+    // Called from the user client's thread. Hand the FireWire work to the
+    // driver's queue, the same way the front-panel path does, instead of
+    // transacting from whatever thread asked. Reports whether the request was
+    // accepted, not whether the device finished.
+    if (runtimePolicy_.routerPrograms == nullptr ||
+        index >= runtimePolicy_.routerProgramCount) {
+        return kIOReturnBadArgument;
+    }
+    if (!initialized_) {
+        return kIOReturnNotReady;
+    }
+    if (timerScheduler_ == nullptr) {
+        return kIOReturnNotReady;
+    }
+    (void)timerScheduler_->ScheduleAfter(
+        0, [this, index]() { SelectRouterProgram(index, [](IOReturn) {}); });
+    return kIOReturnSuccess;
+}
+
+void DICETcatProtocol::CycleRouterProgram() {
+    const uint32_t total = runtimePolicy_.routerProgramCount;
+    if (total < 2) {
+        return;
+    }
+    const uint32_t next =
+        (activeRouterProgram_.load(std::memory_order_acquire) + 1U) % total;
+    SelectRouterProgram(next, [](IOReturn) {});
+}
+
+void DICETcatProtocol::NotificationThunk(void* context, uint32_t bits) noexcept {
+    if (auto* self = static_cast<DICETcatProtocol*>(context)) {
+        self->OnDeviceNotification(bits);
+    }
+}
+
+void DICETcatProtocol::OnDeviceNotification(uint32_t bits) noexcept {
+    const uint32_t mask = runtimePolicy_.routerCycleNotifyMask;
+    if (mask == 0 || (bits & mask) == 0 || runtimePolicy_.routerProgramCount < 2) {
+        return;
+    }
+    // This runs on the local-request path. Coalesce and hand the FireWire work
+    // to the driver's queue instead of transacting from here.
+    if (togglePending_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (timerScheduler_ == nullptr) {
+        togglePending_.store(false, std::memory_order_release);
+        ASFW_LOG(DICE, "Front-panel button ignored: no timer scheduler");
+        return;
+    }
+    (void)timerScheduler_->ScheduleAfter(0, [this]() { ServiceRouterCycle(); });
+}
+
+void DICETcatProtocol::ServiceRouterCycle() {
+    togglePending_.store(false, std::memory_order_release);
+    if (!initialized_) {
+        return;
+    }
+    CycleRouterProgram();
+}
+
+// --- Per-output trim ---------------------------------------------------------
+//
+// The Mbox Pro keeps one attenuation register per analog output inside the
+// vendor application section (DAC1..DAC6 in Avid's daemon). Reads are
+// asynchronous, so the value the control surface sees comes from a cache the
+// protocol refreshes on demand and updates on every write.
+
+uint8_t DICETcatProtocol::GetOutputTrim(uint32_t index) const {
+    if (index >= runtimePolicy_.outputTrimCount || index >= kMaxOutputTrims) {
+        return 0;
+    }
+    return outputTrims_[index].load(std::memory_order_acquire);
+}
+
+IOReturn DICETcatProtocol::SetOutputTrim(uint32_t index, uint8_t value) {
+    if (runtimePolicy_.outputTrimCount == 0 || index >= runtimePolicy_.outputTrimCount ||
+        index >= kMaxOutputTrims) {
+        return kIOReturnBadArgument;
+    }
+    if (!initialized_) {
+        return kIOReturnNotReady;
+    }
+
+    // Optimistic: the cache moves now so the UI stays responsive, and a failed
+    // write is corrected by the next refresh.
+    outputTrims_[index].store(value, std::memory_order_release);
+
+    const uint32_t offset = runtimePolicy_.outputTrimOffset + index * 4U;
+    diceReader_.ReadExtensionSections(
+        [this, offset, index, value](IOReturn status, ExtensionSections ext) {
+            if (status != kIOReturnSuccess) {
+                return;
+            }
+            CacheExtensions(ext);
+            const uint32_t appBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.application);
+            if (appBase == kDICEExtensionOffset) {
+                return;
+            }
+            (void)io_.WriteQuadBE(
+                MakeDICEAddress(appBase + offset), static_cast<uint32_t>(value),
+                [index, value](Async::AsyncStatus st) {
+                    if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess) {
+                        ASFW_LOG(DICE, "Output trim %u write failed (value=%u)", index, value);
+                    }
+                });
+        });
+    return kIOReturnSuccess;
+}
+
+IOReturn DICETcatProtocol::RefreshOutputTrims() {
+    if (runtimePolicy_.outputTrimCount == 0) {
+        return kIOReturnUnsupported;
+    }
+    if (!initialized_) {
+        return kIOReturnNotReady;
+    }
+    ReadOutputTrims();
+    return kIOReturnSuccess;
+}
+
+void DICETcatProtocol::ReadOutputTrims() {
+    const uint32_t count = runtimePolicy_.outputTrimCount;
+    const uint32_t offset = runtimePolicy_.outputTrimOffset;
+    diceReader_.ReadExtensionSections(
+        [this, count, offset](IOReturn status, ExtensionSections ext) {
+            if (status != kIOReturnSuccess) {
+                return;
+            }
+            CacheExtensions(ext);
+            const uint32_t appBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.application);
+            if (appBase == kDICEExtensionOffset) {
+                return;
+            }
+            (void)io_.ReadBlock(
+                MakeDICEAddress(appBase + offset), count * 4U,
+                [this, count](Async::AsyncStatus st, std::span<const uint8_t> payload) {
+                    if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess ||
+                        payload.size() < count * 4U) {
+                        ASFW_LOG(DICE, "Output trim read failed");
+                        return;
+                    }
+                    for (uint32_t i = 0; i < count && i < kMaxOutputTrims; ++i) {
+                        // Big-endian quadlet; the trim lives in the low byte.
+                        outputTrims_[i].store(payload[i * 4U + 3U], std::memory_order_release);
+                    }
+                });
+        });
+}
+
+// --- Mixer matrix ------------------------------------------------------------
+//
+// The TCAT mixer section is a one-quadlet header followed by one quadlet per
+// coefficient, indexed output-major: index = out * inputs + in. Unity is
+// device specific (0x4000 on the Mbox Pro). Reads are chunked because the
+// whole matrix is larger than a comfortable block transfer.
+
+namespace {
+constexpr uint32_t kMixerChunkQuadlets = 64;
+}
+
+uint16_t DICETcatProtocol::GetMixerCoefficient(uint32_t out, uint32_t in) const {
+    if (out >= runtimePolicy_.mixerOutputs || in >= runtimePolicy_.mixerInputs) {
+        return 0;
+    }
+    const uint32_t index = out * runtimePolicy_.mixerInputs + in;
+    if (index >= kMaxMixerCells) {
+        return 0;
+    }
+    return mixerCells_[index].load(std::memory_order_acquire);
+}
+
+IOReturn DICETcatProtocol::SetMixerCoefficient(uint32_t out, uint32_t in, uint16_t gain) {
+    if (runtimePolicy_.mixerInputs == 0 || out >= runtimePolicy_.mixerOutputs ||
+        in >= runtimePolicy_.mixerInputs) {
+        return kIOReturnBadArgument;
+    }
+    if (!initialized_) {
+        return kIOReturnNotReady;
+    }
+    const uint32_t index = out * runtimePolicy_.mixerInputs + in;
+    if (index >= kMaxMixerCells) {
+        return kIOReturnBadArgument;
+    }
+
+    // Optimistic, like the trims: the cache moves now so faders stay smooth.
+    // The cache is also what the write reads from, so a move that arrives while
+    // an earlier write is still in flight is not lost, it supersedes it.
+    mixerCells_[index].store(gain, std::memory_order_release);
+    IssueMixerWrite(index);
+    return kIOReturnSuccess;
+}
+
+namespace {
+// A coefficient write in flight for longer than this has lost its completion:
+// a dropped transaction or a bus reset can swallow one. Without a way to take
+// the cell back, a single lost completion strands it forever -- it stays marked
+// busy, every later move is coalesced behind a write that will never finish,
+// and that fader silently stops reaching the device for the rest of the
+// session, which looks exactly like "the sound went and never came back".
+constexpr uint64_t kMixerWriteStallNs = 500ULL * 1000ULL * 1000ULL;
+}  // namespace
+
+bool DICETcatProtocol::ClaimMixerCell(uint32_t index) {
+    bool expected = false;
+    if (mixerCellBusy_[index].compare_exchange_strong(expected, true,
+                                                      std::memory_order_acq_rel)) {
+        mixerCellIssuedAt_[index].store(mach_absolute_time(), std::memory_order_release);
+        return true;
+    }
+
+    const uint64_t issued = mixerCellIssuedAt_[index].load(std::memory_order_acquire);
+    const uint64_t now = mach_absolute_time();
+    if (issued == 0 || now <= issued ||
+        (now - issued) < ASFW::Timing::nanosToHostTicks(kMixerWriteStallNs)) {
+        return false;
+    }
+
+    // Take the cell over. If the stale completion does arrive later it only
+    // clears the flag, and the value written is always the newest one from the
+    // cache, so a redundant write is harmless.
+    ASFW_LOG(DICE, "Mixer coefficient %u write stalled; taking the cell over", index);
+    mixerCellIssuedAt_[index].store(now, std::memory_order_release);
+    return true;
+}
+
+void DICETcatProtocol::IssueMixerWrite(uint32_t index) {
+    if (index >= kMaxMixerCells) {
+        return;
+    }
+
+    // Claim the cell. If a write is already in flight, leave the value behind
+    // as dirty and let that write's completion pick it up.
+    if (!ClaimMixerCell(index)) {
+        mixerCellDirty_[index].store(true, std::memory_order_release);
+        // The in-flight write may have completed between the failed claim and
+        // that store, in which case nobody would come back for the value, so
+        // try once more to claim the cell ourselves.
+        if (!ClaimMixerCell(index)) {
+            return;
+        }
+        mixerCellDirty_[index].store(false, std::memory_order_release);
+    }
+
+    ExtensionSections ext{};
+    if (!CachedExtensions(ext)) {
+        // First write of the session: pay for the section read once, and the
+        // callback caches it so no later write has to.
+        diceReader_.ReadExtensionSections(
+            [this, index](IOReturn status, ExtensionSections fresh) {
+                if (status != kIOReturnSuccess) {
+                    mixerCellBusy_[index].store(false, std::memory_order_release);
+                    return;
+                }
+                CacheExtensions(fresh);
+                WriteMixerCell(fresh, index);
+            });
+        return;
+    }
+    WriteMixerCell(ext, index);
+}
+
+void DICETcatProtocol::WriteMixerCell(const ExtensionSections& ext, uint32_t index) {
+    const uint32_t mixerBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.mixer);
+    if (mixerBase == kDICEExtensionOffset) {
+        mixerCellBusy_[index].store(false, std::memory_order_release);
+        return;
+    }
+    const uint16_t value = mixerCells_[index].load(std::memory_order_acquire);
+    const Async::AsyncHandle queued = io_.WriteQuadBE(
+        MakeDICEAddress(mixerBase + 4U + index * 4U), static_cast<uint32_t>(value),
+        [this, index](Async::AsyncStatus st) {
+            if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess) {
+                ASFW_LOG(DICE, "Mixer coefficient %u write failed", index);
+            }
+            mixerCellBusy_[index].store(false, std::memory_order_release);
+            if (mixerCellDirty_[index].exchange(false, std::memory_order_acq_rel)) {
+                IssueMixerWrite(index);
+            }
+        });
+    if (!queued.IsValid()) {
+        // Nothing was enqueued, so no completion will arrive to free the cell.
+        mixerCellBusy_[index].store(false, std::memory_order_release);
+    }
+}
+
+void DICETcatProtocol::CacheExtensions(const ExtensionSections& ext) {
+    extSections_ = ext;
+    extValid_.store(true, std::memory_order_release);
+}
+
+bool DICETcatProtocol::CachedExtensions(ExtensionSections& out) const {
+    if (!extValid_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    out = extSections_;
+    return true;
+}
+
+IOReturn DICETcatProtocol::RefreshMixer() {
+    if (runtimePolicy_.mixerInputs == 0 || runtimePolicy_.mixerOutputs == 0) {
+        return kIOReturnUnsupported;
+    }
+    if (!initialized_) {
+        return kIOReturnNotReady;
+    }
+    diceReader_.ReadExtensionSections([this](IOReturn status, ExtensionSections ext) {
+        if (status != kIOReturnSuccess) {
+            return;
+        }
+        CacheExtensions(ext);
+        const uint32_t mixerBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.mixer);
+        if (mixerBase == kDICEExtensionOffset) {
+            return;
+        }
+        ReadMixerChunk(mixerBase, 0);
+    });
+    return kIOReturnSuccess;
+}
+
+void DICETcatProtocol::ReadMixerChunk(uint32_t mixerBase, uint32_t firstIndex) {
+    const uint32_t total = runtimePolicy_.mixerInputs * runtimePolicy_.mixerOutputs;
+    if (firstIndex >= total || firstIndex >= kMaxMixerCells) {
+        return;
+    }
+    const uint32_t remaining = total - firstIndex;
+    const uint32_t chunk = remaining < kMixerChunkQuadlets ? remaining : kMixerChunkQuadlets;
+
+    (void)io_.ReadBlock(
+        MakeDICEAddress(mixerBase + 4U + firstIndex * 4U), chunk * 4U,
+        [this, mixerBase, firstIndex, chunk](Async::AsyncStatus st,
+                                             std::span<const uint8_t> payload) {
+            if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess ||
+                payload.size() < chunk * 4U) {
+                ASFW_LOG(DICE, "Mixer read failed at index %u", firstIndex);
+                return;
+            }
+            for (uint32_t i = 0; i < chunk; ++i) {
+                const uint32_t index = firstIndex + i;
+                if (index >= kMaxMixerCells) {
+                    break;
+                }
+                // Big-endian quadlet; the gain is the low 16 bits.
+                const uint16_t gain =
+                    static_cast<uint16_t>((payload[i * 4U + 2U] << 8) | payload[i * 4U + 3U]);
+                mixerCells_[index].store(gain, std::memory_order_release);
+            }
+            // Walk the rest of the matrix.
+            ReadMixerChunk(mixerBase, firstIndex + chunk);
+        });
+}
+
+// Outputs fed from the mixer carry silence until the matrix has coefficients,
+// so a router program is only half the configuration. Written once at bring-up.
+//
+// The writes are chained rather than issued in a burst: firing all of them at
+// once overruns the async queue and only the first couple land.
+void DICETcatProtocol::WriteStartupMixerCoefficients() {
+    if (runtimePolicy_.startupMixerCoefficients == nullptr ||
+        runtimePolicy_.startupMixerCoefficientCount == 0) {
+        return;
+    }
+    diceReader_.ReadExtensionSections([this](IOReturn status, ExtensionSections ext) {
+        if (status != kIOReturnSuccess) {
+            return;
+        }
+        CacheExtensions(ext);
+        const uint32_t mixerBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.mixer);
+        if (mixerBase == kDICEExtensionOffset) {
+            return;
+        }
+        WriteStartupMixerCoefficient(mixerBase, 0);
+    });
+}
+
+void DICETcatProtocol::WriteStartupMixerCoefficient(uint32_t mixerBase, uint32_t pair) {
+    const uint32_t count = runtimePolicy_.startupMixerCoefficientCount;
+    if (pair >= count) {
+        ASFW_LOG(DICE, "Startup mixer: wrote %u coefficients", count);
+        return;
+    }
+    const uint16_t index = runtimePolicy_.startupMixerCoefficients[pair * 2];
+    const uint16_t gain = runtimePolicy_.startupMixerCoefficients[pair * 2 + 1];
+    if (index < kMaxMixerCells) {
+        mixerCells_[index].store(gain, std::memory_order_release);
+    }
+
+    (void)io_.WriteQuadBE(
+        MakeDICEAddress(mixerBase + 4U + index * 4U), static_cast<uint32_t>(gain),
+        [this, mixerBase, pair, index](Async::AsyncStatus st) {
+            if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess) {
+                ASFW_LOG(DICE, "Startup mixer coefficient %u failed", index);
+            }
+            // Continue regardless: one bad cell should not abort the rest.
+            WriteStartupMixerCoefficient(mixerBase, pair + 1);
+        });
+}
+
+// --- Peak meters --------------------------------------------------------------
+//
+// The TCAT peak section mirrors the router: one quadlet per route, with the
+// route in the low 16 bits and its peak level in the high 16. Reading it is
+// how the original panel drove its meters.
+
+uint32_t DICETcatProtocol::GetPeakCount() const {
+    return peakCount_.load(std::memory_order_acquire);
+}
+
+uint32_t DICETcatProtocol::GetPeakEntry(uint32_t index) const {
+    if (index >= kMaxPeakEntries) {
+        return 0;
+    }
+    return peakEntries_[index].load(std::memory_order_acquire);
+}
+
+IOReturn DICETcatProtocol::RefreshPeaks() {
+    if (!initialized_) {
+        return kIOReturnNotReady;
+    }
+    diceReader_.ReadExtensionSections([this](IOReturn status, ExtensionSections ext) {
+        if (status != kIOReturnSuccess) {
+            return;
+        }
+        CacheExtensions(ext);
+        const uint32_t peakBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.peak);
+        if (peakBase == kDICEExtensionOffset) {
+            return;
+        }
+        const uint32_t want = ext.peak.size < kMaxPeakEntries ? ext.peak.size : kMaxPeakEntries;
+        (void)io_.ReadBlock(
+            MakeDICEAddress(peakBase), want * 4U,
+            [this, want](Async::AsyncStatus st, std::span<const uint8_t> payload) {
+                if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess ||
+                    payload.size() < want * 4U) {
+                    return;
+                }
+                uint32_t live = 0;
+                for (uint32_t i = 0; i < want; ++i) {
+                    const uint32_t v = (static_cast<uint32_t>(payload[i * 4U]) << 24) |
+                                       (static_cast<uint32_t>(payload[i * 4U + 1]) << 16) |
+                                       (static_cast<uint32_t>(payload[i * 4U + 2]) << 8) |
+                                       static_cast<uint32_t>(payload[i * 4U + 3]);
+                    peakEntries_[i].store(v, std::memory_order_release);
+                    if ((v & 0xFFFFU) != 0) {
+                        live = i + 1;
+                    }
+                }
+                peakCount_.store(live, std::memory_order_release);
+            });
+    });
+    return kIOReturnSuccess;
+}
+
+void DICETcatProtocol::WriteFrontPanelLed(uint8_t select) {
+    if (!runtimePolicy_.driveFrontPanelLed) {
+        return;
+    }
+    diceReader_.ReadExtensionSections(
+        [this, select](IOReturn status, ExtensionSections ext) {
+            if (status != kIOReturnSuccess) {
+                return;
+            }
+            CacheExtensions(ext);
+            const uint32_t appBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.application);
+            if (appBase == kDICEExtensionOffset) {
+                return;
+            }
+            // Application section +0x14 is the Mbox Pro's UILEDState. Its
+            // control byte is the low byte of the quadlet; bits 6-5 carry the
+            // monitor selection. Bit 0 is part of the value the device ships
+            // with and is preserved. Verified on hardware: 0 leaves the light
+            // off, 1 lights it green.
+            const uint32_t value = 0x00000100U | 0x01U |
+                                   (static_cast<uint32_t>(select & 0x3U) << 5);
+            (void)io_.WriteQuadBE(
+                MakeDICEAddress(appBase + kMboxProUILedStateOffset), value,
+                [value](Async::AsyncStatus st) {
+                    if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess) {
+                        ASFW_LOG(DICE, "Front-panel LED write failed (value=0x%08x)", value);
+                    }
+                });
+        });
+}
+
 void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
                                      const AudioClockConfig& desiredClock,
                                      PrepareCallback callback) {
@@ -186,15 +919,25 @@ void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
         selectedClock_ = desiredClock;
     }
 
-    duplexCtrl_->PrepareDuplex(
-        channels,
-        diceClock,
-        [this, callback = std::move(callback)](IOReturn status, DiceDuplexPrepareResult result) mutable {
-            if (status == kIOReturnSuccess) {
-                CacheRuntimeCaps(result.runtimeCaps);
-            }
-            callback(status, result);
-        });
+    ApplyStartupRouter([this, channels, diceClock, callback = std::move(callback)](
+                           IOReturn routerStatus) mutable {
+        // A router program is device configuration, not a bring-up gate: if it
+        // fails the streams can still come up (silently, on devices that need
+        // it), so log and continue rather than failing the whole start.
+        if (routerStatus != kIOReturnSuccess) {
+            ASFW_LOG(DICE, "PrepareDuplex: startup router not applied (0x%08x); continuing",
+                     routerStatus);
+        }
+        duplexCtrl_->PrepareDuplex(
+            channels,
+            diceClock,
+            [this, callback = std::move(callback)](IOReturn status, DiceDuplexPrepareResult result) mutable {
+                if (status == kIOReturnSuccess) {
+                    CacheRuntimeCaps(result.runtimeCaps);
+                }
+                callback(status, result);
+            });
+    });
 }
 
 void DICETcatProtocol::ProgramRx(StageCallback callback) {

@@ -74,6 +74,15 @@ public:
         // Developer-only complete audio lifecycle control, GUID scalar input.
         kMethodStartAudioStreaming     = 62,
         kMethodStopAudioStreaming      = 63,
+
+        // Output modes (mutually exclusive output configurations).
+        kMethodGetOutputModes          = 64,
+        kMethodSelectOutputMode        = 65,
+        kMethodGetOutputTrims          = 66,
+        kMethodSetOutputTrim           = 67,
+        kMethodGetMixerRow             = 68,
+        kMethodSetMixerCoefficient     = 69,
+        kMethodGetPeaks                = 70,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

@@ -74,6 +74,8 @@ public:
     static constexpr uint32_t kAlesisMultiMixModelId = DeviceProfiles::Audio::kAlesisMultiMixModelId;
     static constexpr uint32_t kMidasVendorId = DeviceProfiles::Audio::kMidasVendorId;
     static constexpr uint32_t kMidasVeniceModelId = DeviceProfiles::Audio::kMidasVeniceModelId;
+    static constexpr uint32_t kAvidVendorId = DeviceProfiles::Audio::kAvidVendorId;
+    static constexpr uint32_t kMboxProModelId = DeviceProfiles::Audio::kMboxProModelId;
     static constexpr uint32_t kPreSonusVendorId = DeviceProfiles::Audio::kPreSonusVendorId;
     static constexpr uint32_t kStudioLive1602ModelId =
         DeviceProfiles::Audio::kStudioLive1602ModelId;

@@ -1136,6 +1136,197 @@ kern_return_t ASFWDriver::StartAudioStreaming(uint64_t guid) {
     return ctx.audioCoordinator->StartStreaming(guid);
 }
 
+// Output modes are a property of the device protocol; the driver only resolves
+// the GUID and forwards. Names come back as a single NUL-separated blob so the
+// call stays one round trip.
+kern_return_t ASFWDriver::GetOutputModes(uint64_t guid,
+                                         uint32_t* outCount,
+                                         uint32_t* outActive,
+                                         char* outNames,
+                                         size_t namesCapacity) {
+    if (outCount == nullptr || outActive == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    *outCount = 0;
+    *outActive = 0;
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        ASFW_LOG(Audio, "GetOutputModes: no protocol registered for GUID=0x%016llx", guid);
+        return kIOReturnNoDevice;
+    }
+
+    const uint32_t count = protocol->GetOutputModeCount();
+    *outCount = count;
+    *outActive = protocol->GetActiveOutputMode();
+    if (outNames == nullptr || namesCapacity == 0) {
+        return kIOReturnSuccess;
+    }
+
+    size_t used = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const char* name = protocol->GetOutputModeName(i);
+        if (name == nullptr) {
+            name = "";
+        }
+        const size_t len = strnlen(name, 63);
+        if (used + len + 1 > namesCapacity) {
+            break;
+        }
+        memcpy(outNames + used, name, len);
+        used += len;
+        outNames[used++] = '\0';
+    }
+    if (used < namesCapacity) {
+        outNames[used] = '\0';
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t ASFWDriver::GetOutputTrims(uint64_t guid,
+                                         uint32_t* outCount,
+                                         uint8_t* outValues,
+                                         size_t valuesCapacity) {
+    if (outCount == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    *outCount = 0;
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        return kIOReturnNoDevice;
+    }
+
+    // Ask for a fresh read; the values below are whatever the cache holds now,
+    // so the first call after attach may be one refresh behind.
+    (void)protocol->RefreshOutputTrims();
+
+    const uint32_t count = protocol->GetOutputTrimCount();
+    *outCount = count;
+    if (outValues == nullptr) {
+        return kIOReturnSuccess;
+    }
+    for (uint32_t i = 0; i < count && i < valuesCapacity; ++i) {
+        outValues[i] = protocol->GetOutputTrim(i);
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t ASFWDriver::SetOutputTrim(uint64_t guid, uint32_t index, uint8_t value) {
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        return kIOReturnNoDevice;
+    }
+    return protocol->SetOutputTrim(index, value);
+}
+
+kern_return_t ASFWDriver::GetMixerRow(uint64_t guid,
+                                     uint32_t output,
+                                     uint32_t* outInputs,
+                                     uint32_t* outOutputs,
+                                     uint32_t* outUnity,
+                                     uint16_t* outGains,
+                                     size_t gainsCapacity) {
+    if (outInputs == nullptr || outOutputs == nullptr || outUnity == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    *outInputs = 0;
+    *outOutputs = 0;
+    *outUnity = 0;
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        return kIOReturnNoDevice;
+    }
+
+    const uint32_t inputs = protocol->GetMixerInputCount();
+    *outInputs = inputs;
+    *outOutputs = protocol->GetMixerOutputCount();
+    *outUnity = protocol->GetMixerUnityGain();
+    if (inputs == 0) {
+        return kIOReturnUnsupported;
+    }
+
+    // Row 0 also asks for a refresh, so a full read of the matrix costs one
+    // sweep rather than one per row.
+    if (output == 0) {
+        (void)protocol->RefreshMixer();
+    }
+    if (outGains == nullptr) {
+        return kIOReturnSuccess;
+    }
+    for (uint32_t i = 0; i < inputs && i < gainsCapacity; ++i) {
+        outGains[i] = protocol->GetMixerCoefficient(output, i);
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t ASFWDriver::SetMixerCoefficient(uint64_t guid,
+                                              uint32_t output,
+                                              uint32_t input,
+                                              uint32_t gain) {
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        return kIOReturnNoDevice;
+    }
+    return protocol->SetMixerCoefficient(output, input, static_cast<uint16_t>(gain & 0xFFFFU));
+}
+
+kern_return_t ASFWDriver::GetPeaks(uint64_t guid,
+                                   uint32_t* outCount,
+                                   uint32_t* outEntries,
+                                   size_t entriesCapacity) {
+    if (outCount == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    *outCount = 0;
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        return kIOReturnNoDevice;
+    }
+
+    // Kick a fresh read; the values below are the previous sweep, which at
+    // meter refresh rates is one frame of latency.
+    (void)protocol->RefreshPeaks();
+
+    const uint32_t count = protocol->GetPeakCount();
+    *outCount = count;
+    if (outEntries == nullptr) {
+        return kIOReturnSuccess;
+    }
+    for (uint32_t i = 0; i < count && i < entriesCapacity; ++i) {
+        outEntries[i] = protocol->GetPeakEntry(i);
+    }
+    return kIOReturnSuccess;
+}
+
+kern_return_t ASFWDriver::SelectOutputMode(uint64_t guid, uint32_t index) {
+    if (!ivars || !ivars->context || !ivars->context->deps.audioRuntimeRegistry) {
+        return kIOReturnNotReady;
+    }
+    auto protocol = ivars->context->deps.audioRuntimeRegistry->FindShared(guid);
+    if (!protocol) {
+        return kIOReturnNoDevice;
+    }
+    ASFW_LOG(Audio, "Output mode %u requested GUID=0x%016llx", index, guid);
+    return protocol->SelectOutputMode(index);
+}
+
 kern_return_t ASFWDriver::StopAudioStreaming(uint64_t guid) {
     if (!ivars || !ivars->context || !ivars->context->audioCoordinator) {
         return kIOReturnNotReady;

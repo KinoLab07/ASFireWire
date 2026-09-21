@@ -60,6 +60,13 @@ final class ASFWDriverConnector: ObservableObject {
         case requestUserBusReset = 61
         case startAudioStreaming = 62
         case stopAudioStreaming = 63
+        case getOutputModes = 64
+        case selectOutputMode = 65
+        case getOutputTrims = 66
+        case setOutputTrim = 67
+        case getMixerRow = 68
+        case setMixerCoefficient = 69
+        case getPeaks = 70
         // Read-only audio telemetry diagnostics.
         case getAudioTelemetry = 1013
         // Driver-owned LogRing category names and named filter presets.

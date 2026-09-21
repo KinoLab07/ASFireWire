@@ -112,6 +112,41 @@ public:
     kern_return_t StartAudioStreaming(uint64_t guid) LOCALONLY;
     kern_return_t StopAudioStreaming(uint64_t guid) LOCALONLY;
 
+    // Output modes: mutually exclusive output configurations offered by
+    // hardware that cannot drive everything at once.
+    kern_return_t GetOutputModes(uint64_t guid,
+                                 uint32_t* outCount,
+                                 uint32_t* outActive,
+                                 char* outNames,
+                                 size_t namesCapacity) LOCALONLY;
+    kern_return_t SelectOutputMode(uint64_t guid, uint32_t index) LOCALONLY;
+
+    // Per-output trim, as raw device register bytes.
+    kern_return_t GetOutputTrims(uint64_t guid,
+                                 uint32_t* outCount,
+                                 uint8_t* outValues,
+                                 size_t valuesCapacity) LOCALONLY;
+    kern_return_t SetOutputTrim(uint64_t guid, uint32_t index, uint8_t value) LOCALONLY;
+
+    // Mixer matrix: geometry plus one output row of coefficients per call.
+    kern_return_t GetMixerRow(uint64_t guid,
+                              uint32_t output,
+                              uint32_t* outInputs,
+                              uint32_t* outOutputs,
+                              uint32_t* outUnity,
+                              uint16_t* outGains,
+                              size_t gainsCapacity) LOCALONLY;
+    kern_return_t SetMixerCoefficient(uint64_t guid,
+                                      uint32_t output,
+                                      uint32_t input,
+                                      uint32_t gain) LOCALONLY;
+
+    // Peak meters: one packed (level << 16 | route) word per router route.
+    kern_return_t GetPeaks(uint64_t guid,
+                           uint32_t* outCount,
+                           uint32_t* outEntries,
+                           size_t entriesCapacity) LOCALONLY;
+
     // Isochronous Receive Control
     kern_return_t StartIsochReceive(uint8_t channel, uint32_t wireFormatRaw, uint32_t am824Slots) LOCALONLY;
     kern_return_t StopIsochReceive() LOCALONLY;

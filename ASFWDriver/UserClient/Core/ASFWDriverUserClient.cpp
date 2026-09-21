@@ -73,6 +73,14 @@ enum {
     kMethodRequestUserBusReset = 61,
     kMethodStartAudioStreaming = 62,
     kMethodStopAudioStreaming = 63,
+    // Output modes (mutually exclusive output configurations).
+    kMethodGetOutputModes = 64,
+    kMethodSelectOutputMode = 65,
+    kMethodGetOutputTrims = 66,
+    kMethodSetOutputTrim = 67,
+    kMethodGetMixerRow = 68,
+    kMethodSetMixerCoefficient = 69,
+    kMethodGetPeaks = 70,
     // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
     kMethodTestIRMAllocation = 26,
     kMethodTestIRMRelease = 27,
@@ -109,6 +117,17 @@ std::optional<uint32_t> GetFirstScalarInput(const IOUserClientMethodArguments* a
     }
 
     return static_cast<uint32_t>(arguments->scalarInput[0]);
+}
+
+// GUIDs are 64-bit and every FireWire GUID has bits above 32 set, so the
+// narrowing helper above silently destroys them. Anything taking a GUID must
+// use this one.
+std::optional<uint64_t> GetFirstScalarInput64(const IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount < 1) {
+        return std::nullopt;
+    }
+
+    return arguments->scalarInput[0];
 }
 
 MethodDispatchResult DispatchBusResetMethods(ASFW::UserClient::UserClientRuntimeState& runtimeState,
@@ -332,13 +351,157 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
     switch (selector) {
     case kMethodStartAudioStreaming:
     case kMethodStopAudioStreaming: {
-        const auto guid = GetFirstScalarInput(arguments);
+        const auto guid = GetFirstScalarInput64(arguments);
         if (!guid.has_value() || *guid == 0) {
             return MethodDispatchResult{kIOReturnBadArgument};
         }
         return MethodDispatchResult{selector == kMethodStartAudioStreaming
                                         ? driver.StartAudioStreaming(*guid)
                                         : driver.StopAudioStreaming(*guid)};
+    }
+    case kMethodGetOutputModes: {
+        const auto guid = GetFirstScalarInput64(arguments);
+        if (!guid.has_value() || *guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        // scalar[0] = mode count, scalar[1] = active index; the struct output
+        // carries the names as a NUL-separated blob.
+        char names[512] = {};
+        uint32_t count = 0;
+        uint32_t active = 0;
+        const kern_return_t st =
+            driver.GetOutputModes(*guid, &count, &active, names, sizeof(names));
+        if (st != kIOReturnSuccess) {
+            return MethodDispatchResult{st};
+        }
+        if (arguments->scalarOutput != nullptr && arguments->scalarOutputCount >= 2) {
+            arguments->scalarOutput[0] = count;
+            arguments->scalarOutput[1] = active;
+            arguments->scalarOutputCount = 2;
+        }
+        ASFW_LOG(UserClient, "GetOutputModes GUID=0x%016llx count=%u active=%u",
+                 static_cast<unsigned long long>(*guid), count, active);
+        OSData* blob = OSData::withBytes(names, static_cast<uint32_t>(sizeof(names)));
+        if (blob == nullptr) {
+            return MethodDispatchResult{kIOReturnNoMemory};
+        }
+        arguments->structureOutput = blob;
+        arguments->structureOutputDescriptor = nullptr;
+        return MethodDispatchResult{kIOReturnSuccess};
+    }
+    case kMethodSelectOutputMode: {
+        if (arguments->scalarInputCount < 2) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        const uint64_t guid = arguments->scalarInput[0];
+        const uint32_t index = static_cast<uint32_t>(arguments->scalarInput[1]);
+        if (guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        return MethodDispatchResult{driver.SelectOutputMode(guid, index)};
+    }
+    case kMethodGetOutputTrims: {
+        const auto guid = GetFirstScalarInput64(arguments);
+        if (!guid.has_value() || *guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        uint8_t values[16] = {};
+        uint32_t count = 0;
+        const kern_return_t st =
+            driver.GetOutputTrims(*guid, &count, values, sizeof(values));
+        if (st != kIOReturnSuccess) {
+            return MethodDispatchResult{st};
+        }
+        if (arguments->scalarOutput != nullptr && arguments->scalarOutputCount >= 1) {
+            arguments->scalarOutput[0] = count;
+            arguments->scalarOutputCount = 1;
+        }
+        OSData* blob = OSData::withBytes(values, static_cast<uint32_t>(sizeof(values)));
+        if (blob == nullptr) {
+            return MethodDispatchResult{kIOReturnNoMemory};
+        }
+        arguments->structureOutput = blob;
+        arguments->structureOutputDescriptor = nullptr;
+        return MethodDispatchResult{kIOReturnSuccess};
+    }
+    case kMethodSetOutputTrim: {
+        if (arguments->scalarInputCount < 3) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        const uint64_t guid = arguments->scalarInput[0];
+        const uint32_t index = static_cast<uint32_t>(arguments->scalarInput[1]);
+        const uint8_t value = static_cast<uint8_t>(arguments->scalarInput[2] & 0xFFU);
+        if (guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        return MethodDispatchResult{driver.SetOutputTrim(guid, index, value)};
+    }
+    case kMethodGetMixerRow: {
+        if (arguments->scalarInputCount < 2) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        const uint64_t guid = arguments->scalarInput[0];
+        const uint32_t output = static_cast<uint32_t>(arguments->scalarInput[1]);
+        if (guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        uint16_t gains[32] = {};
+        uint32_t inputs = 0, outputs = 0, unity = 0;
+        const kern_return_t st = driver.GetMixerRow(guid, output, &inputs, &outputs, &unity,
+                                                    gains, 32);
+        if (st != kIOReturnSuccess) {
+            return MethodDispatchResult{st};
+        }
+        if (arguments->scalarOutput != nullptr && arguments->scalarOutputCount >= 3) {
+            arguments->scalarOutput[0] = inputs;
+            arguments->scalarOutput[1] = outputs;
+            arguments->scalarOutput[2] = unity;
+            arguments->scalarOutputCount = 3;
+        }
+        OSData* blob = OSData::withBytes(gains, static_cast<uint32_t>(sizeof(gains)));
+        if (blob == nullptr) {
+            return MethodDispatchResult{kIOReturnNoMemory};
+        }
+        arguments->structureOutput = blob;
+        arguments->structureOutputDescriptor = nullptr;
+        return MethodDispatchResult{kIOReturnSuccess};
+    }
+    case kMethodSetMixerCoefficient: {
+        if (arguments->scalarInputCount < 4) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        const uint64_t guid = arguments->scalarInput[0];
+        if (guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        return MethodDispatchResult{driver.SetMixerCoefficient(
+            guid,
+            static_cast<uint32_t>(arguments->scalarInput[1]),
+            static_cast<uint32_t>(arguments->scalarInput[2]),
+            static_cast<uint32_t>(arguments->scalarInput[3]))};
+    }
+    case kMethodGetPeaks: {
+        const auto guid = GetFirstScalarInput64(arguments);
+        if (!guid.has_value() || *guid == 0) {
+            return MethodDispatchResult{kIOReturnBadArgument};
+        }
+        uint32_t entries[128] = {};
+        uint32_t count = 0;
+        const kern_return_t st = driver.GetPeaks(*guid, &count, entries, 128);
+        if (st != kIOReturnSuccess) {
+            return MethodDispatchResult{st};
+        }
+        if (arguments->scalarOutput != nullptr && arguments->scalarOutputCount >= 1) {
+            arguments->scalarOutput[0] = count;
+            arguments->scalarOutputCount = 1;
+        }
+        OSData* blob = OSData::withBytes(entries, static_cast<uint32_t>(sizeof(entries)));
+        if (blob == nullptr) {
+            return MethodDispatchResult{kIOReturnNoMemory};
+        }
+        arguments->structureOutput = blob;
+        arguments->structureOutputDescriptor = nullptr;
+        return MethodDispatchResult{kIOReturnSuccess};
     }
     case kMethodGetAudioAutoStart:
         return HandleGetAudioAutoStart(driver, arguments);

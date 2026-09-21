@@ -54,6 +54,47 @@ public:
     /// Check if device supports hardware mixer
     virtual bool HasMixer() const { return false; }
 
+    // Output modes. Some hardware cannot drive all of its outputs at once and
+    // instead offers a set of mutually exclusive configurations - the Avid
+    // Mbox Pro can clock either its line outputs or its headphones, never
+    // both. Devices without that constraint report zero modes.
+    virtual uint32_t GetOutputModeCount() const { return 0; }
+    virtual uint32_t GetActiveOutputMode() const { return 0; }
+    virtual const char* GetOutputModeName(uint32_t /*index*/) const { return ""; }
+    virtual IOReturn SelectOutputMode(uint32_t /*index*/) { return kIOReturnUnsupported; }
+
+    // Per-output trim, as a raw device register value. The meaning of the byte
+    // is device specific; on the Avid Mbox Pro it is attenuation in half
+    // decibels (register = -2 x dB), so 0 is unity and 255 is the quietest.
+    // Values are served from a cache the protocol keeps in step with the
+    // device, because reads are asynchronous.
+    virtual uint32_t GetOutputTrimCount() const { return 0; }
+    virtual uint8_t GetOutputTrim(uint32_t /*index*/) const { return 0; }
+    virtual IOReturn SetOutputTrim(uint32_t /*index*/, uint8_t /*value*/) {
+        return kIOReturnUnsupported;
+    }
+    virtual IOReturn RefreshOutputTrims() { return kIOReturnUnsupported; }
+
+    // Mixer matrix. Coefficients are linear gains as the device stores them,
+    // with a device-specific unity value; the caller converts to decibels.
+    // Like the trims, values are served from a cache kept in step with the
+    // device because reads are asynchronous.
+    virtual uint32_t GetMixerInputCount() const { return 0; }
+    virtual uint32_t GetMixerOutputCount() const { return 0; }
+    virtual uint16_t GetMixerUnityGain() const { return 0; }
+    virtual uint16_t GetMixerCoefficient(uint32_t /*out*/, uint32_t /*in*/) const { return 0; }
+    virtual IOReturn SetMixerCoefficient(uint32_t /*out*/, uint32_t /*in*/, uint16_t /*gain*/) {
+        return kIOReturnUnsupported;
+    }
+    virtual IOReturn RefreshMixer() { return kIOReturnUnsupported; }
+
+    // Peak meters. The device keeps one entry per router route, each holding
+    // the route itself in the low half and its current peak in the high half,
+    // so a caller finds a meter by looking up the route it cares about.
+    virtual uint32_t GetPeakCount() const { return 0; }
+    virtual uint32_t GetPeakEntry(uint32_t /*index*/) const { return 0; }
+    virtual IOReturn RefreshPeaks() { return kIOReturnUnsupported; }
+
     /// Query runtime-discovered audio stream capabilities.
     /// Returns true when the protocol has authoritative stream caps (e.g. DICE TX/RX stream formats).
     virtual bool GetRuntimeAudioStreamCaps(AudioStreamRuntimeCaps& outCaps) const {
