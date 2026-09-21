@@ -126,9 +126,14 @@ archivos basta: no hay que tocar `project.yml`.
 
 ### Operativa
 
-- [ ] **`git commit`.** No hay ni un commit del trabajo del Mbox Pro: 21 archivos
-      modificados y 7 sin seguimiento sobre `main`, en
-      `https://github.com/mrmidi/ASFireWire.git`.
+- [x] **`git commit`** — hecho el 21 de septiembre. Cinco commits locales sobre
+      `main`: el buzón de notificaciones, el arreglo de CLOCK_SELECT, el aparato
+      entero (router, mezclador, picos), los tres documentos y el `deploy.sh` con
+      el número de versión. El panel quedó fuera sin borrarse, así que lo
+      commiteado compila sin él.
+- [ ] **Empujar a `origin/main`** — a propósito todavía no. Primero instalar
+      Tahoe en esta máquina y comprobar que el aparato sigue sonando. Y antes de
+      empujar, la limpieza del panel de aquí arriba.
 - [ ] Antes de instalar, **siempre** `systemextensionsctl list`. Dos entradas →
       reiniciar antes de intentarlo.
 
