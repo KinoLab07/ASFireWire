@@ -181,6 +181,8 @@ private:
     // target clock, so the PLL relock happens once (during the idle ApplyClockConfig)
     // instead of again mid-bring-up where it disrupts the streams being enabled.
     uint32_t preClaimClockSelect_{0};
+    uint32_t preClaimSampleRate_{0};
+    uint32_t preClaimStatus_{0};
     const std::atomic<bool>* teardownCancel_{nullptr};
 };
 

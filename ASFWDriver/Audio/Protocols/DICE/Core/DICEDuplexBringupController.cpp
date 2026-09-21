@@ -449,6 +449,8 @@ void DICEDuplexBringupController::DoReadGlobalBeforeClaim(
                                 }
 
                                 preClaimClockSelect_ = state.clockSelect;
+                                preClaimSampleRate_ = state.sampleRate;
+                                preClaimStatus_ = state.status;
                                 ASFW_LOG(DICE,
                                          "PrepareDuplex48k: global pre-claim owner=0x%016llx enable=%u notify=0x%08x clockSelect=0x%08x",
                                          state.owner,
@@ -551,12 +553,29 @@ void DICEDuplexBringupController::DoWriteClockSelect(
     // re-triggers the PLL relock during the bring-up, right as streams are being
     // enabled, which wedges the device-side streams. The downstream stable-lock gate
     // (DoAwaitStreamingClockLock) still waits for the lock to settle before enabling.
-    if (preClaimClockSelect_ == diceClock_.clockSelect) {
+    // The CLOCK_SELECT readback alone is not proof that the device actually runs
+    // at that rate: the Avid Mbox Pro reports CLOCK_SELECT=0x020c (48 kHz) while its
+    // SAMPLE_RATE register still reads 44100. Skipping the write there means the
+    // device never raises CLOCK_ACCEPTED and bring-up times out (kIOReturnTimeout).
+    // Only treat the write as redundant when the measured rate agrees with the target.
+    const uint32_t targetRateHz = restartSession_.desiredClock.sampleRateHz;
+    const bool achievedRateAtTarget =
+        NominalRateHz(preClaimStatus_) == targetRateHz &&
+        preClaimSampleRate_ == targetRateHz;
+
+    if (preClaimClockSelect_ == diceClock_.clockSelect && achievedRateAtTarget) {
         ASFW_LOG(DICE,
                  "PrepareDuplex48k: device already at target clockSelect=0x%08x; skipping redundant write",
                  diceClock_.clockSelect);
         DoActiveClockCheck(channels, NotificationMailbox::Consume(), std::move(cb));
         return;
+    }
+
+    if (preClaimClockSelect_ == diceClock_.clockSelect) {
+        ASFW_LOG(DICE,
+                 "PrepareDuplex48k: clockSelect=0x%08x already requests %u Hz but device reports "
+                 "%u Hz (status=0x%08x); rewriting",
+                 preClaimClockSelect_, targetRateHz, preClaimSampleRate_, preClaimStatus_);
     }
 
     NotificationMailbox::Reset();
