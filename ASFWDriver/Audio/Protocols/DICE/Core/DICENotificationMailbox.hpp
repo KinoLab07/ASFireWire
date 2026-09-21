@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 namespace ASFW::Audio::DICE::NotificationMailbox {
@@ -17,8 +18,18 @@ constexpr uint64_t kLegacyHandlerOffset = 0x00FF0000D1CCULL;
 
 inline std::atomic<uint32_t> gLatchedBits{0};
 using ObserverFn = void(*)(void* context, uint32_t bits);
-inline std::atomic<void*> gObserverContext{nullptr};
-inline std::atomic<ObserverFn> gObserver{nullptr};
+
+// Several subsystems care about the same notification quadlet: the audio
+// backend watches clock events while a device protocol may also need them (the
+// Avid Mbox Pro reports its front-panel button here). A single slot let
+// whichever registered last silently displace the other, so keep a small fixed
+// set instead.
+inline constexpr size_t kMaxObservers = 4;
+struct ObserverSlot {
+    std::atomic<void*> context{nullptr};
+    std::atomic<ObserverFn> fn{nullptr};
+};
+inline ObserverSlot gObservers[kMaxObservers];
 
 /// Reset any latched notification bits.
 inline void Reset() noexcept {
@@ -28,23 +39,46 @@ inline void Reset() noexcept {
 /// Latch notification bits observed from device writes.
 inline void Publish(uint32_t bits) noexcept {
     gLatchedBits.fetch_or(bits, std::memory_order_acq_rel);
-    if (const auto observer = gObserver.load(std::memory_order_acquire)) {
-        observer(gObserverContext.load(std::memory_order_acquire), bits);
+    for (auto& slot : gObservers) {
+        void* ctx = slot.context.load(std::memory_order_acquire);
+        ObserverFn fn = slot.fn.load(std::memory_order_acquire);
+        if (ctx != nullptr && fn != nullptr) {
+            fn(ctx, bits);
+        }
     }
 }
 
 inline void SetObserver(void* context, ObserverFn observer) noexcept {
-    gObserverContext.store(context, std::memory_order_release);
-    gObserver.store(observer, std::memory_order_release);
+    if (context == nullptr || observer == nullptr) {
+        return;
+    }
+    // Re-registering the same context updates it in place rather than
+    // consuming a second slot.
+    for (auto& slot : gObservers) {
+        if (slot.context.load(std::memory_order_acquire) == context) {
+            slot.fn.store(observer, std::memory_order_release);
+            return;
+        }
+    }
+    for (auto& slot : gObservers) {
+        void* expected = nullptr;
+        if (slot.context.compare_exchange_strong(expected, context,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+            slot.fn.store(observer, std::memory_order_release);
+            return;
+        }
+    }
 }
 
 inline void ClearObserver(void* context) noexcept {
-    if (gObserverContext.load(std::memory_order_acquire) != context) {
-        return;
+    for (auto& slot : gObservers) {
+        if (slot.context.load(std::memory_order_acquire) == context) {
+            slot.fn.store(nullptr, std::memory_order_release);
+            slot.context.store(nullptr, std::memory_order_release);
+            return;
+        }
     }
-
-    gObserver.store(nullptr, std::memory_order_release);
-    gObserverContext.store(nullptr, std::memory_order_release);
 }
 
 [[nodiscard]] inline bool MatchesDestOffset(uint64_t destOffset) noexcept {
