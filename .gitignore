@@ -103,3 +103,7 @@ __pycache__/
 /mcp_log_query.json
 /mcp_log_query_latest.json
 /captures/**/*.json
+
+# Arte de referencia de Avid: SOLO para desarrollo local, se reemplaza por
+# grafica propia antes de publicar. No distribuir.
+ASFW/Resources/MboxPro/
