@@ -1,4 +1,4 @@
-# Estado y pendientes — 21 de septiembre de 2026
+# Estado y pendientes — 22 de septiembre de 2026
 
 Sustituye a la sección 10 de `MBOX_PRO_PANEL.md`, que queda como material del
 artículo pero ya no como lista de trabajo.
@@ -18,7 +18,14 @@ artículo pero ya no como lista de trabajo.
 | LED del panel | controlable por registro |
 | Mezclador desde el host | escribe y responde, verificado |
 
-Versión instalada y funcionando: **0.3.0 build 15**.
+Versión instalada y funcionando: **0.3.0 build 17**, sobre macOS 26.7 recién
+instalado y compilada en esa misma máquina con Xcode 27.
+
+**El ciclo completo está probado** (22 de septiembre): compilar → desplegar →
+instalar → sonar. La build 15 de la partición vieja se rescató antes de borrarla
+y sirvió de puente para arrancar sin compilar; la 17 se compiló ya en el sistema
+nuevo. Compilación limpia desde cero: 45 segundos, cero errores, firma válida con
+los cinco entitlements dentro.
 
 La cadena de control se demostró de punta a punta: silenciar las dos tiras de
 playback lleva el altavoz a **0 exacto** y restaurarlas lo devuelve. La ley de
@@ -49,7 +56,21 @@ Lo que **sí** se queda, porque es conocimiento del aparato y no de la interfaz:
 
 ---
 
-## Limpieza antes de publicar
+## Limpieza antes de publicar — HECHA el 22 de septiembre de 2026
+
+Se hizo, y con una variante deliberada: **nada se borró, todo se movió** a
+`7-PANEL-ABANDONADO/`. El motivo apareció al comprobarlo: de los 9 archivos de
+`ASFW/Resources/MboxPro/`, los 8 PNG sí tenían copia en `2-REFERENCIA-AVID/`,
+pero **`panel-atlas.json` no** — y ese no es de Avid, es propio: el mapa de cómo
+se recorta el atlas de sprites. Seguir el `rm -rf` al pie de la letra lo habría
+perdido.
+
+Resultado verificado: ninguna referencia al panel queda en el árbol, compila
+limpio sin él (76 → 73 avisos) y el repositorio ya no necesita el arte de Avid
+para construirse. **El panel nunca llegó a git**: se mantuvo fuera de los commits
+desde el principio, así que la limpieza no produjo ningún cambio que commitear.
+
+El procedimiento original queda abajo como registro de qué se tocó.
 
 Cuatro pasos. Ninguno toca el driver.
 
@@ -100,9 +121,22 @@ archivos basta: no hay que tocar `project.yml`.
 
 ### Driver
 
-- [ ] **Validar en frío el arranque.** Que tras encender desde cero el aparato
-      salga programado y sonando sin intervención. Se arregló la lógica el 21 de
-      septiembre pero **no se ha comprobado desde un arranque limpio**.
+- [x] **Validar en frío el arranque de la máquina** — hecho el 22 de septiembre,
+      y sin querer: tras el reinicio que hizo falta para resolver el relevo de
+      versiones, el dext arrancó solo desde el bundle nuevo y el aparato sonaba
+      sin tocar nada. Reinicio de la máquina con la Mbox conectada y encendida:
+      validado.
+- [ ] **Falta validar el arranque en frío del aparato**, que es el otro caso:
+      encender la Mbox **después** de que el Mac ya esté arrancado, y que salga
+      programada y sonando sin intervención.
+- [ ] **Sustituir un dext en caliente no funciona.** Reproducido en Tahoe limpio:
+      la versión vieja se queda en `terminating for upgrade via delegate` y no
+      suelta el controlador PCI, la nueva figura como `activated enabled` pero
+      nunca arranca, y el aparato deja de sonar aunque siga apareciendo como
+      dispositivo de audio. Solo se arregla reiniciando. Documentado como paso
+      obligatorio en `5-INSTALAR/INSTALAR-EN-TAHOE.md`, pero **la causa no está
+      investigada**: puede estar relacionado con los timeouts del camino asíncrono
+      de aquí abajo.
 - [ ] **Mover la programación del router al enganche del dispositivo**, no a la
       puesta en marcha del audio. Hoy el router lee 0 entradas hasta que arranca
       el audio, lo que confunde cualquier diagnóstico.
@@ -126,14 +160,24 @@ archivos basta: no hay que tocar `project.yml`.
 
 ### Operativa
 
-- [x] **`git commit`** — hecho el 21 de septiembre. Cinco commits locales sobre
-      `main`: el buzón de notificaciones, el arreglo de CLOCK_SELECT, el aparato
-      entero (router, mezclador, picos), los tres documentos y el `deploy.sh` con
-      el número de versión. El panel quedó fuera sin borrarse, así que lo
-      commiteado compila sin él.
-- [ ] **Empujar a `origin/main`** — a propósito todavía no. Primero instalar
-      Tahoe en esta máquina y comprobar que el aparato sigue sonando. Y antes de
-      empujar, la limpieza del panel de aquí arriba.
+- [x] **`git commit`** — hecho. **Siete commits locales** sobre `main`: el buzón
+      de notificaciones, el arreglo de CLOCK_SELECT, el aparato entero (router,
+      mezclador, picos), los tres documentos, el `deploy.sh` y el arreglo de su
+      ruta de despliegue. El panel quedó fuera sin borrarse.
+- [x] **Probar en el Tahoe nuevo** — hecho el 22 de septiembre. Suena.
+- [ ] **Reautenticar GitHub.** El token del llavero se invalidó con la
+      actualización a Tahoe: `gh auth login -h github.com`. Bloquea todo lo de
+      abajo.
+- [ ] **Publicar el fork** en `github.com/KinoLab07/ASFireWire` y empujar `main`
+      con los siete commits.
+- [ ] **Abrir el PR a `mrmidi/ASFireWire`** desde la rama `avid-mbox-pro`, que
+      contiene **solo los tres commits de código** (buzón, CLOCK_SELECT y el
+      aparato: 21 archivos, 2.034 líneas). Deja fuera a propósito los documentos
+      en español, el `deploy.sh` y los números de build, que son de esta máquina
+      y no del proyecto. Esto cubre el pendiente de "llevar aguas arriba".
+- [ ] **Borrar la rama `respaldo-antes-de-reescribir`** una vez empujado. Existe
+      porque se reescribió el mensaje de un commit que contenía una afirmación
+      falsa sobre el `Info.plist` (ver abajo).
 - [ ] Antes de instalar, **siempre** `systemextensionsctl list`. Dos entradas →
       reiniciar antes de intentarlo.
 
@@ -152,9 +196,18 @@ archivos basta: no hay que tocar `project.yml`.
   defecto de nuestras propias tablas, que saltaban el mezclador.
 - **Sin coeficientes de mezclador no suena nada**, porque las salidas se
   alimentan de `MIXo`. La tabla de rutas sola es media configuración.
-- **Instalar en una máquina con la seguridad íntegra no es posible hoy**, y no
-  por falta de un clic: los permisos de DriverKit restringidos no tienen diálogo
-  de excepción. Hace falta la concesión de Apple + Developer ID + notarización.
+- **No existe ningún diálogo de "permitir igualmente"** para los entitlements
+  restringidos: los valida AMFI contra un perfil firmado por Apple, y el "Allow"
+  de Ajustes del Sistema aprueba *cargar* una extensión ya firmada válidamente,
+  que es otra puerta. Esto es firme.
+- **Pero "instalar con la seguridad íntegra no es posible" era demasiado fuerte.**
+  Corregido el 21 de septiembre: Apple introdujo variantes **"development"** de
+  los entitlements de DriverKit, que no requieren aprobación y permiten dejar SIP
+  **activado**. El muro real es la cuota de 99 $/año — con Apple ID gratuito no
+  hay perfil de DriverKit. Lo que sigue necesitando concesión de Apple, Developer
+  ID y notarización es **distribuir a terceros**, no el uso propio. Detalle
+  completo y las dos incógnitas que lo hundirían en
+  `5-INSTALAR/INSTALAR-EN-TAHOE.md`, apartado SIP.
 
 ---
 
