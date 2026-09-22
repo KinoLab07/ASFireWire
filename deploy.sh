@@ -7,8 +7,14 @@
 # una app construida con build.sh a secas nunca llega a instalarse.
 #
 # El otro motivo de este script: build.sh escribe en ./build/DerivedData, pero la
-# extension registrada apunta al bundle de la carpeta de Xcode. Tenerlos separados
-# hizo que durante un buen rato se probara una app distinta de la que se compilaba.
+# extension registrada apunta a OTRO bundle. Tenerlos separados hizo que durante un
+# buen rato se probara una app distinta de la que se compilaba.
+#
+# El destino era el DerivedData de Xcode, con un hash de la ruta del proyecto escrito
+# a mano. Eso se rompio al mover el repositorio: el hash dejo de corresponder. Ahora
+# el destino es /Applications, que es de donde macOS tiene registrada la extension
+# y a donde copia tambien el install.sh de las releases. No depende de donde este
+# el repositorio.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -16,7 +22,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 export DEVELOPER_DIR
 
 SRC="build/DerivedData/Build/Products/Debug/ASFW.app"
-DEST="$HOME/Library/Developer/Xcode/DerivedData/ASFW-behqjociaryvfaafpqkjzxnnmdvd/Build/Products/Debug/ASFW.app"
+DEST="/Applications/ASFW.app"
 
 ./build.sh "$@" --set CODE_SIGNING_ALLOWED=YES --set CODE_SIGNING_REQUIRED=YES --set CODE_SIGN_IDENTITY=-
 
