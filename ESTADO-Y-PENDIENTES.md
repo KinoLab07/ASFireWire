@@ -1,4 +1,8 @@
-# Estado y pendientes — 22 de septiembre de 2026
+# Estado y pendientes — 29 de septiembre de 2026
+
+> **Cerrado el 29 de septiembre:** el soporte de la Mbox Pro está portado a la
+> arquitectura actual de upstream (v0.3.1), verificado con el aparato sonando, y
+> propuesto como pull request: **mrmidi/ASFireWire#162**.
 
 Sustituye a la sección 10 de `MBOX_PRO_PANEL.md`, que queda como material del
 artículo pero ya no como lista de trabajo.
@@ -170,11 +174,18 @@ archivos basta: no hay que tocar `project.yml`.
       abajo.
 - [ ] **Publicar el fork** en `github.com/KinoLab07/ASFireWire` y empujar `main`
       con los siete commits.
-- [ ] **Abrir el PR a `mrmidi/ASFireWire`** desde la rama `avid-mbox-pro`, que
-      contiene **solo los tres commits de código** (buzón, CLOCK_SELECT y el
-      aparato: 21 archivos, 2.034 líneas). Deja fuera a propósito los documentos
-      en español, el `deploy.sh` y los números de build, que son de esta máquina
-      y no del proyecto. Esto cubre el pendiente de "llevar aguas arriba".
+- [x] **PR abierto: mrmidi/ASFireWire#162**, desde la rama `avid-port`. 12
+      archivos, 374 líneas. No es la rama `avid-mbox-pro` que se preparó el 22:
+      upstream avanzó 370 commits en una semana y retiró la arquitectura entera
+      sobre la que se apoyaba (`DeviceProtocolFactory`, `AudioProfileRegistry`,
+      `DICEDuplexBringupController`). Hubo que re-expresarlo, no rebasarlo.
+- [x] **Los dos arreglos de DICE quedaron obsoletos**, y por buenas razones. El
+      del buzón lo resolvió upstream mejor (`fabd595e`: uno por dispositivo más
+      un router que atribuye cada escritura, lo que además arregla que el
+      CLOCK_ACCEPTED de un aparato terminase la espera de otro). Y el de
+      CLOCK_SELECT lo encontró mrmidi por su cuenta tres días después
+      (`b1d80f39`), validándolo con una Saffire Pro 24 DSP, una Venice F24 y una
+      MultiMix. Dos personas, dos aparatos distintos, el mismo diagnóstico.
 - [ ] **Borrar la rama `respaldo-antes-de-reescribir`** una vez empujado. Existe
       porque se reescribió el mensaje de un commit que contenía una afirmación
       falsa sobre el `Info.plist` (ver abajo).
