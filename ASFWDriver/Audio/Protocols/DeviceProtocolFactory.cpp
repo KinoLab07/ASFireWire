@@ -29,18 +29,31 @@ constexpr DICE::TCAT::DICERouterProgram kMboxProOutputModes[] = {
     },
 };
 
-// Flattened (index, gain) pairs for the mixer coefficients that come with that
-// table. Without them the mixer-fed outputs are silent.
+// Flattened (index, gain) pairs of the mixer coefficients that go with that
+// table. Without them the mixer-fed outputs are silent. Index is
+// output * 18 + input; unity is 0x4000; mixer inputs 8-15 are host playback
+// channels 1-8. Keep this in step with kStartupMixerCoefficients in
+// AvidMboxProRouting.hpp, which carries the same values.
 constexpr uint16_t kMboxProMixerCoefficients[] = {
-    8, 0x0abb, 9, 0x12b7, 10, 0x12b7, 11, 0x12b7,
-    12, 0x12b7, 13, 0x12b7, 14, 0x10d4, 15, 0x10d4,
-    16, 0x19f2,
-    26, 0x0abb, 27, 0x12b7, 28, 0x12b7, 29, 0x12b7,
-    30, 0x12b7, 31, 0x12b7, 32, 0x10d4, 33, 0x10d4,
-    34, 0x19f2,
-    46, 0x4000, 65, 0x4000, 84, 0x4000, 103, 0x4000,
+    // Line outs 1-6: one playback channel each, at unity.
+    8, 0x4000,  27, 0x4000,  46, 0x4000,
+    65, 0x4000, 84, 0x4000,  103, 0x4000,
+    // S/PDIF: playback 7-8 at unity.
     122, 0x4000, 141, 0x4000,
-    152, 0x4000, 171, 0x4000, 190, 0x4000, 209, 0x4000,
+    // Headphones A (outs 8-9) and B (outs 10-11): every playback channel, odd
+    // channels left and even right, each at -12 dB so four cannot clip.
+    152, 0x1000, 154, 0x1000, 156, 0x1000, 158, 0x1000,
+    171, 0x1000, 173, 0x1000, 175, 0x1000, 177, 0x1000,
+    188, 0x1000, 190, 0x1000, 192, 0x1000, 194, 0x1000,
+    207, 0x1000, 209, 0x1000, 211, 0x1000, 213, 0x1000,
+    // Explicit zeros for the cells the previous program left summed into the
+    // monitor bus. NOT zeroed: out0<-in6 and out1<-in7, which the firmware
+    // uses to apply the front-panel monitor knob, and the factory analog-in
+    // feeds on the S/PDIF outputs. Zeroing the knob cells silenced every
+    // analog output on hardware (9 Oct) even with the router and the rest of
+    // the matrix correct.
+    9, 0, 10, 0, 11, 0, 12, 0, 13, 0, 14, 0, 15, 0, 16, 0,
+    26, 0, 28, 0, 29, 0, 30, 0, 31, 0, 32, 0, 33, 0, 34, 0,
 };
 
 } // namespace
