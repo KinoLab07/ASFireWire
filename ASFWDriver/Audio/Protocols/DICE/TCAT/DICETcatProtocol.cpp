@@ -350,6 +350,29 @@ void DICETcatProtocol::WriteStartupMixerCells(const ExtensionSections& ext) {
              runtimePolicy_.startupMixerCellCount);
 }
 
+void DICETcatProtocol::WriteStartupApplicationRegisters(const ExtensionSections& ext) {
+    if (runtimePolicy_.startupApplicationWrites == nullptr ||
+        runtimePolicy_.startupApplicationWriteCount == 0) {
+        return;
+    }
+    const uint32_t appBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.application);
+    if (appBase == kDICEExtensionOffset) {
+        return;
+    }
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < runtimePolicy_.startupApplicationWriteCount; ++i) {
+        const auto& write = runtimePolicy_.startupApplicationWrites[i];
+        if (deviceIo_.WriteQuad(appBase + write.offset, write.value)) {
+            ++written;
+        } else {
+            // One bad register should not abort the rest.
+            ASFW_LOG(DICE, "Startup application write: offset +0x%x failed", write.offset);
+        }
+    }
+    ASFW_LOG(DICE, "Startup application write: wrote %u of %u registers", written,
+             runtimePolicy_.startupApplicationWriteCount);
+}
+
 void DICETcatProtocol::ApplyStartupProgram() {
     if (runtimePolicy_.startupRouterEntries == nullptr ||
         runtimePolicy_.startupRouterEntryCount == 0) {
@@ -382,6 +405,7 @@ void DICETcatProtocol::ApplyStartupProgram() {
         return;
     }
     WriteStartupMixerCells(*ext);
+    WriteStartupApplicationRegisters(*ext);
     startupProgramApplied_ = true;
 }
 

@@ -37,6 +37,14 @@ struct DiceStartupMixerCell final {
     uint16_t gain{0};
 };
 
+// One raw quadlet write into the "application" EAP section at bring-up.
+// `offset` is a byte offset from that section's own base, the same unit the
+// device's register map documents (e.g. Avid's UITarget sits at +0x0C).
+struct DiceStartupApplicationWrite final {
+    uint32_t offset{0};
+    uint32_t value{0};
+};
+
 struct DICETcatRuntimePolicy final {
     bool exposeDeviceToHostToCoreAudio{true};
     // Keep the target-rate transition strict, but do not require a GLOBAL
@@ -60,6 +68,13 @@ struct DICETcatRuntimePolicy final {
     // path does not work".
     const DiceStartupMixerCell* startupMixerCells{nullptr};
     uint32_t startupMixerCellCount{0};
+
+    // Raw quadlet writes into the vendor-specific "application" EAP section,
+    // applied once alongside the router and mixer. Some devices gate part of
+    // their own analog signal path on a register here that nothing upstream
+    // otherwise touches.
+    const DiceStartupApplicationWrite* startupApplicationWrites{nullptr};
+    uint32_t startupApplicationWriteCount{0};
 };
 
 class DICETcatProtocol final : public Audio::IDeviceProtocol,
@@ -174,6 +189,7 @@ private:
     [[nodiscard]] std::expected<void, IOReturn> WriteRouterProgram(
         const ExtensionSections& ext);
     void WriteStartupMixerCells(const ExtensionSections& ext);
+    void WriteStartupApplicationRegisters(const ExtensionSections& ext);
     GeneralSections sections_{};
     bool initialized_{false};
     bool sectionsLoaded_{false};

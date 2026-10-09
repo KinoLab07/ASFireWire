@@ -126,4 +126,29 @@ inline constexpr uint32_t kStartupMixerCoefficientCount =
     static_cast<uint32_t>(sizeof(kStartupMixerCoefficients) /
                           sizeof(kStartupMixerCoefficients[0]));
 
+// 2026-10-09: the vendor "application" EAP section (+0x6D64 at the factory
+// defaults read on this device, section index 8) holds a register at +0x0C -
+// Avid's own driver calls it UITarget - that is a per-output bitmask of which
+// analog outputs follow the front-panel monitor wheel. It powers up at 0, and
+// with it at 0 every output in this table plays back at the mixer's fixed
+// coefficients with the physical wheel doing nothing; Avid's own driver sets
+// it to 0x3F, all six analog outputs. The wheel's own position (+0x08) is not
+// reset at power-up - it is remembered by the device across power cycles, not
+// zeroed, contrary to what the first reading of this register suggested - so
+// once UITarget is set the wheel plays the role of a hardware master volume
+// for the analog outputs, same as on Avid's own driver and the physical
+// front-panel behavior described in the product manual.
+//
+// Verified on a second Mbox Pro on macOS Sequoia, against a separate
+// user-space driver built from this device's own register map, where it was
+// found necessary for the wheel to have any effect at all. NOT YET verified
+// against this driver's own bring-up sequence or on this repository's
+// reference hardware; confirm sound and wheel response before relying on it.
+inline constexpr TCAT::DiceStartupApplicationWrite kStartupApplicationWrites[] = {
+    {0x0C, 0x3F},
+};
+inline constexpr uint32_t kStartupApplicationWriteCount =
+    static_cast<uint32_t>(sizeof(kStartupApplicationWrites) /
+                          sizeof(kStartupApplicationWrites[0]));
+
 } // namespace ASFW::Audio::DICE::Avid::MboxProRouting
