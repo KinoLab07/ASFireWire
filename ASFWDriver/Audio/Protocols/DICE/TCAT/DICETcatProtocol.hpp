@@ -94,6 +94,15 @@ struct DICETcatRuntimePolicy final {
     // output * mixerInputs + input.
     const uint16_t* startupMixerCoefficients{nullptr};   // flattened pairs
     uint32_t startupMixerCoefficientCount{0};
+
+    // Cells the device's own firmware fills in at power-on and that a host
+    // configuration wants silent. They are NOT part of the startup program:
+    // writing them there is what silences the Mbox Pro. They are cleared once
+    // the stream is confirmed running, when the firmware has already placed
+    // them and no longer touches them. Plain cell indices, same indexing as
+    // the startup coefficients.
+    const uint16_t* postStartMixerZeros{nullptr};
+    uint32_t postStartMixerZeroCount{0};
 };
 
 class DICETcatProtocol final : public Audio::IDeviceProtocol,
@@ -218,6 +227,7 @@ private:
     ::ASFW::Scheduling::ITimerScheduler* timerScheduler_{nullptr};  // driver-owned
     DICETcatRuntimePolicy runtimePolicy_{};
     bool startupRouterApplied_{false};
+    bool firmwareMonitorCellsCleared_{false};
 
     // --- Front-panel router toggle -------------------------------------------
     void WriteRouterProgram(const uint16_t* entries, uint32_t count, VoidCallback callback);
@@ -244,6 +254,10 @@ private:
     void WriteMixerCell(const ExtensionSections& ext, uint32_t index);
     void WriteStartupMixerCoefficients();
     void WriteStartupMixerCoefficient(uint32_t mixerBase, uint32_t pair);
+    void ClearFirmwareMonitorCells(uint32_t attempt = 0U);
+    void ClearFirmwareMonitorCell(uint32_t mixerBase, uint32_t slot, uint32_t attempt);
+    void VerifyFirmwareMonitorCells(uint32_t mixerBase, uint32_t attempt,
+                                    uint32_t firstIndex, uint32_t stillSet);
 
     static constexpr uint32_t kMaxPeakEntries = 128;
     std::atomic<uint32_t> peakEntries_[kMaxPeakEntries]{};

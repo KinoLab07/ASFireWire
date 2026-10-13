@@ -34,6 +34,22 @@ constexpr DICE::TCAT::DICERouterProgram kMboxProOutputModes[] = {
 // output * 18 + input; unity is 0x4000; mixer inputs 8-15 are host playback
 // channels 1-8. Keep this in step with kStartupMixerCoefficients in
 // AvidMboxProRouting.hpp, which carries the same values.
+// The firmware's own monitor matrix, read off the device: the eight analog and
+// S/PDIF inputs into all eight outputs, even outputs from the even inputs and
+// odd from the odd. One gain for all of them, latched from the front-panel knob
+// at power-on. Cleared after the stream is confirmed, never at bring-up - see
+// ClearFirmwareMonitorCells.
+constexpr uint16_t kMboxProFirmwareMonitorCells[] = {
+      0,   2,   4,   6,      // out 0 <- in 0,2,4,6
+     19,  21,  23,  25,      // out 1 <- in 1,3,5,7
+     36,  38,  40,  42,      // out 2
+     55,  57,  59,  61,      // out 3
+     72,  74,  76,  78,      // out 4
+     91,  93,  95,  97,      // out 5
+    108, 110, 112, 114,      // out 6 (S/PDIF L)
+    127, 129, 131, 133,      // out 7 (S/PDIF R)
+};
+
 constexpr uint16_t kMboxProMixerCoefficients[] = {
     // Line outs 1-6: one playback channel each, at unity.
     8, 0x4000,  27, 0x4000,  46, 0x4000,
@@ -171,6 +187,10 @@ std::unique_ptr<IDeviceProtocol> DeviceProtocolFactory::Create(
                 .startupMixerCoefficientCount =
                     static_cast<uint32_t>(sizeof(kMboxProMixerCoefficients) /
                                           sizeof(kMboxProMixerCoefficients[0]) / 2),
+                .postStartMixerZeros = kMboxProFirmwareMonitorCells,
+                .postStartMixerZeroCount =
+                    static_cast<uint32_t>(sizeof(kMboxProFirmwareMonitorCells) /
+                                          sizeof(kMboxProFirmwareMonitorCells[0])),
                 // DAC1..DAC6 in Avid's daemon: attenuation for the six analog
                 // line outputs, one quadlet each from application +0x28.
                 .outputTrimCount = 6,

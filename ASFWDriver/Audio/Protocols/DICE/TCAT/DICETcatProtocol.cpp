@@ -813,6 +813,134 @@ void DICETcatProtocol::WriteStartupMixerCoefficient(uint32_t mixerBase, uint32_t
         });
 }
 
+// --- Firmware monitor cells ---------------------------------------------------
+//
+// The Mbox Pro's firmware fills a monitor matrix of its own at power-on: every
+// analog input into every output, even outputs fed from the even inputs and odd
+// from the odd, all at one gain picked from the front-panel knob's position at
+// the moment it powers up (measured 0x40, 0x80, 0xc0 and 0x101 - multiples of
+// 64). Against our unity of 0x4000 that is -48 to -36 dB of every input leaking
+// into every output, which is audible as hum and radio pickup on a hot input.
+//
+// These cells belong to the device, not to the startup program. Writing them as
+// zeros in `startupMixerCoefficients` silences every analog output - two of
+// them (out0<-in6 and out1<-in7) did exactly that on hardware, with the router
+// programmed and the stream running. The same zeros written once the stream is
+// confirmed are harmless: verified cell by cell on hardware with audio playing,
+// all six line outputs still sounding and the leakage gone.
+//
+// The firmware does not put them back while the device stays powered (watched
+// for 70 s), but it restores all of them on the next power-on, so this runs
+// again on each bring-up.
+void DICETcatProtocol::ClearFirmwareMonitorCells(uint32_t attempt) {
+    if (runtimePolicy_.postStartMixerZeros == nullptr ||
+        runtimePolicy_.postStartMixerZeroCount == 0 || !initialized_) {
+        return;
+    }
+    diceReader_.ReadExtensionSections([this, attempt](IOReturn status, ExtensionSections ext) {
+        if (status != kIOReturnSuccess) {
+            return;
+        }
+        CacheExtensions(ext);
+        const uint32_t mixerBase = ASFW::Audio::DICE::ExtensionAbsoluteOffset(ext.mixer);
+        if (mixerBase == kDICEExtensionOffset) {
+            return;
+        }
+        ClearFirmwareMonitorCell(mixerBase, 0, attempt);
+    });
+}
+
+void DICETcatProtocol::ClearFirmwareMonitorCell(uint32_t mixerBase, uint32_t slot,
+                                                uint32_t attempt) {
+    const uint32_t count = runtimePolicy_.postStartMixerZeroCount;
+    if (slot >= count) {
+        VerifyFirmwareMonitorCells(mixerBase, attempt, 0, 0);
+        return;
+    }
+    const uint16_t index = runtimePolicy_.postStartMixerZeros[slot];
+    if (index < kMaxMixerCells) {
+        mixerCells_[index].store(0, std::memory_order_release);
+    }
+
+    // Chained like the startup coefficients: firing all of them at once
+    // overruns the async queue and only the first couple land.
+    (void)io_.WriteQuadBE(
+        MakeDICEAddress(mixerBase + 4U + index * 4U), 0U,
+        [this, mixerBase, slot, index, attempt](Async::AsyncStatus st) {
+            if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess) {
+                ASFW_LOG(DICE, "Monitor-cell clear %u failed", index);
+            }
+            ClearFirmwareMonitorCell(mixerBase, slot + 1, attempt);
+        });
+}
+
+// A write that reports success is not proof the cell is clear, the same way a
+// router commit is not proof the table is there. Read the cells back and retry
+// the whole set once; a leak that survives both passes is logged and left,
+// because a loop here would fight the firmware on every bring-up.
+//
+// Read in the same 64-quadlet chunks as RefreshMixer. Asking for the whole
+// matrix in one block read is how the first version of this failed: the request
+// never completed, so neither the success nor the failure line was ever logged
+// and the cells looked unverified even though the writes had landed.
+void DICETcatProtocol::VerifyFirmwareMonitorCells(uint32_t mixerBase, uint32_t attempt,
+                                                  uint32_t firstIndex, uint32_t stillSet) {
+    const uint32_t count = runtimePolicy_.postStartMixerZeroCount;
+    uint32_t highest = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t index = runtimePolicy_.postStartMixerZeros[i];
+        if (index > highest) {
+            highest = index;
+        }
+    }
+    const uint32_t total = (highest + 1U) < kMaxMixerCells ? (highest + 1U) : kMaxMixerCells;
+
+    if (firstIndex >= total) {
+        if (stillSet == 0) {
+            ASFW_LOG(DICE, "Monitor cells cleared: %u of %u", count, count);
+            firmwareMonitorCellsCleared_ = true;
+            return;
+        }
+        if (attempt == 0U) {
+            ASFW_LOG(DICE, "Monitor cells did not stick (%u of %u still set); retrying once",
+                     stillSet, count);
+            ClearFirmwareMonitorCells(attempt + 1U);
+            return;
+        }
+        ASFW_LOG(DICE, "Monitor cells still set after retry (%u of %u); leaving them",
+                 stillSet, count);
+        return;
+    }
+
+    const uint32_t remaining = total - firstIndex;
+    const uint32_t chunk = remaining < kMixerChunkQuadlets ? remaining : kMixerChunkQuadlets;
+    (void)io_.ReadBlock(
+        MakeDICEAddress(mixerBase + 4U + firstIndex * 4U), chunk * 4U,
+        [this, mixerBase, attempt, firstIndex, chunk, count, stillSet](
+            Async::AsyncStatus st, std::span<const uint8_t> payload) {
+            if (Protocols::Ports::MapAsyncStatusToIOReturn(st) != kIOReturnSuccess ||
+                payload.size() < chunk * 4U) {
+                ASFW_LOG(DICE, "Monitor-cell readback failed at %u; %u cells left unverified",
+                         firstIndex, count);
+                return;
+            }
+            uint32_t found = stillSet;
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint32_t index = runtimePolicy_.postStartMixerZeros[i];
+                if (index < firstIndex || index >= firstIndex + chunk) {
+                    continue;
+                }
+                const size_t at = static_cast<size_t>(index - firstIndex) * 4U;
+                const uint16_t gain =
+                    static_cast<uint16_t>((payload[at + 2U] << 8) | payload[at + 3U]);
+                if (gain != 0) {
+                    ++found;
+                }
+            }
+            VerifyFirmwareMonitorCells(mixerBase, attempt, firstIndex + chunk, found);
+        });
+}
+
 // --- Peak meters --------------------------------------------------------------
 //
 // The TCAT peak section mirrors the router: one quadlet per route, with the
@@ -968,6 +1096,17 @@ void DICETcatProtocol::ConfirmDuplexStart(ConfirmCallback callback) {
         [this, callback = std::move(callback)](IOReturn status, DiceDuplexConfirmResult result) mutable {
             if (status == kIOReturnSuccess) {
                 CacheRuntimeCaps(result.runtimeCaps);
+                // The device has its clock and the stream is confirmed, which is
+                // the earliest moment its own monitor matrix is safe to clear.
+                // Once per protocol instance: the firmware leaves it alone from
+                // here until the next power-on, and a power-on builds a new one.
+                //
+                // This is the path the audio stack actually takes
+                // (AudioDuplexCoordinator calls ConfirmDuplexStart). The
+                // ConfirmDuplex48kStart wrapper below is not on it.
+                if (!firmwareMonitorCellsCleared_) {
+                    ClearFirmwareMonitorCells();
+                }
             }
             callback(status, result);
         });
